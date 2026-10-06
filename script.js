@@ -31,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'QUA': 'Philadelphia Quakers', 'QUE': 'Quebec Nordiques', 'SEA': 'Seattle Kraken',
         'SEN': 'Ottawa Senators (Original)', 'SJS': 'San Jose Sharks', 'SLE': 'St. Louis Eagles',
         'STL': 'St. Louis Blues', 'TAN': 'Toronto Arenas', 'TBL': 'Tampa Bay Lightning',
-        'TOR': 'Toronto Maple Leafs', 'TSP': 'Toronto St. Patricks', 'UTA': 'Utah Hockey Club',
+        'TOR': 'Toronto Maple Leafs', 'TSP': 'Toronto St. Patricks', 'UTA': 'Utah Mammoth',
         'VAN': 'Vancouver Canucks', 'VGK': 'Vegas Golden Knights', 'WIN': 'Winnipeg Jets (Original)',
         'WPG': 'Winnipeg Jets', 'WSH': 'Washington Capitals'
     };
@@ -207,16 +207,187 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // Defunct lines stay separate from the 32 current franchises.
+    // OAK/CGS/CLE are not folded into DAL. WIN is not added to WPG.
+    // SEN is not connected to OTT. HAM is not connected to NYA.
+    const HISTORICAL_FRANCHISES = {
+        WIN: { name: "Winnipeg Jets (original) → Arizona Coyotes", members: ["WIN", "PHX", "ARI"], label: "WIN · Original Jets → Coyotes" },
+        CLE: { name: "Oakland Seals → Cleveland Barons", members: ["OAK", "CGS", "CLE"], label: "CLE · Seals → Barons (merged into North Stars, 1978)" },
+        HAM: { name: "Quebec Bulldogs → Hamilton Tigers", members: ["QBD", "HAM"], label: "HAM · Bulldogs → Tigers" },
+        PIR: { name: "Pittsburgh Pirates → Philadelphia Quakers", members: ["PIR", "QUA"], label: "PIR · Pirates → Quakers" },
+        NYA: { name: "New York Americans → Brooklyn Americans", members: ["NYA", "BRK"], label: "NYA · Americans" },
+        SEN: { name: "Ottawa Senators (original) → St. Louis Eagles", members: ["SEN", "SLE"], label: "SEN · Original Senators → Eagles" },
+        MMR: { name: "Montreal Maroons", members: ["MMR"], label: "MMR · Montreal Maroons" },
+        MWN: { name: "Montreal Wanderers", members: ["MWN"], label: "MWN · Montreal Wanderers" }
+    };
+
+    const CURRENT_TEAM_ABBRS = Object.keys(FRANCHISES);
+
+    function franchiseByKey(key) {
+        return FRANCHISES[key] || HISTORICAL_FRANCHISES[key];
+    }
 
     let data = {};
     let teamColors = {}, teamSecondaryColors = {}, teamTertiaryColors = {};
     let teamQuaternaryColors = {}, teamQuinaryColors = {};
     let uniqueLogos = {};
+    let seasonsByAbbr = null;
     let sortColumn = 'year';
     let sortDirection = 'desc';
     let db = null;
 
     const defaultColors = { c1: '#111111', c2: '#A4A9AD', c3: '#A4A9AD', c4: '#111111', c5: '#A4A9AD' };
+
+    function hexToRgb(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+
+    function rgbToHex(r, g, b) {
+        const h = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+        return `#${h(r)}${h(g)}${h(b)}`;
+    }
+
+    function mixHex(a, b, weightB) {
+        const [ar, ag, ab] = hexToRgb(a);
+        const [br, bg, bb] = hexToRgb(b);
+        const t = weightB;
+        return rgbToHex(ar + (br - ar) * t, ag + (bg - ag) * t, ab + (bb - ab) * t);
+    }
+
+    function channelLuminance(c) {
+        const s = c / 255;
+        return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    }
+
+    function relativeLuminance(hex) {
+        const [r, g, b] = hexToRgb(hex);
+        return 0.2126 * channelLuminance(r) + 0.7152 * channelLuminance(g) + 0.0722 * channelLuminance(b);
+    }
+
+    function contrastRatio(a, b) {
+        const l1 = relativeLuminance(a);
+        const l2 = relativeLuminance(b);
+        const hi = Math.max(l1, l2);
+        const lo = Math.min(l1, l2);
+        return (hi + 0.05) / (lo + 0.05);
+    }
+
+    function validHex(value, fallback) {
+        return (value && /^#[0-9A-F]{6}$/i.test(value)) ? value : fallback;
+    }
+
+    // Near-white team colors disappear on white cards.
+    // Darken only those, and only toward neutral black, so the hue family stays.
+    function paintOnLight(hex) {
+        if (contrastRatio(hex, '#ffffff') >= 1.4) return hex;
+        let color = hex;
+        for (let step = 1; step <= 8; step++) {
+            color = mixHex(hex, '#1a1a1a', step / 10);
+            if (contrastRatio(color, '#ffffff') >= 2.2) return color;
+        }
+        return color;
+    }
+
+    // Secondary text on the primary bar. White only when secondary is too close.
+    function barTextColor(secondary, primary) {
+        return contrastRatio(secondary, primary) < 3 ? '#ffffff' : secondary;
+    }
+
+    // Scrollbar thumb hover stays in the secondary family and still shifts.
+    function scrollThumbHover(secondary) {
+        const toward = relativeLuminance(secondary) > 0.45 ? '#101010' : '#ffffff';
+        return mixHex(secondary, toward, 0.3);
+    }
+
+    function strokeOnFill(stroke, fill) {
+        return contrastRatio(stroke, fill) >= 1.6 ? stroke : paintOnLight(stroke);
+    }
+
+    // Prefer tertiary for xGF%. Use quaternary when tertiary matches the PTS% line.
+    function xgfLineColor(tertiary, quaternary, secondary) {
+        if (tertiary.toLowerCase() !== secondary.toLowerCase()) return tertiary;
+        return quaternary;
+    }
+
+    function resolveTeamColors(abbr) {
+        return {
+            primary: validHex(teamColors[abbr], defaultColors.c1),
+            secondary: validHex(teamSecondaryColors[abbr], defaultColors.c2),
+            tertiary: validHex(teamTertiaryColors[abbr], defaultColors.c3),
+            quaternary: validHex(teamQuaternaryColors[abbr], defaultColors.c4),
+            quinary: validHex(teamQuinaryColors[abbr], defaultColors.c5)
+        };
+    }
+
+    function applyTeamChrome(primary, secondary) {
+        const pageBg = primary;
+        const barText = barTextColor(secondary, primary);
+        const ink = paintOnLight(secondary);
+        const root = document.documentElement;
+        root.style.setProperty('--page-bg', pageBg);
+        root.style.setProperty('--team-c1', primary);
+        root.style.setProperty('--team-c2', secondary);
+        root.style.setProperty('--team-c2-ink', ink);
+        root.style.setProperty('--team-bar-text', barText);
+        root.style.setProperty('--team-scroll-thumb', secondary);
+        root.style.setProperty('--team-scroll-thumb-hover', scrollThumbHover(secondary));
+        document.body.style.backgroundColor = pageBg;
+        const teamHeaderEl = document.querySelector('.team-header');
+        if (teamHeaderEl) {
+            teamHeaderEl.style.backgroundColor = primary;
+            teamHeaderEl.style.color = barText;
+        }
+        const title = document.querySelector('h1.header');
+        if (title) title.style.color = barText;
+        return { pageBg, barText, ink };
+    }
+
+    function datasetHasPoint(data) {
+        if (!Array.isArray(data)) return false;
+        return data.some(v => {
+            if (v == null || v === '') return false;
+            if (typeof v === 'object') {
+                return [v.x, v.y].some(n => n != null && n !== '' && !isNaN(Number(n)));
+            }
+            return !isNaN(Number(v));
+        });
+    }
+
+    function setChartCardVisible(id, visible) {
+        const canvas = document.getElementById(id);
+        const card = canvas ? canvas.closest('.chart') : null;
+        if (!card) return false;
+        card.hidden = false;
+        if (!visible) {
+            const existing = typeof Chart !== 'undefined' ? Chart.getChart(canvas) : null;
+            if (existing) existing.destroy();
+            card.style.display = 'none';
+            return false;
+        }
+        card.style.display = '';
+        return true;
+    }
+
+    function publishChart(id, chart) {
+        const datasets = chart && chart.data ? chart.data.datasets : null;
+        if (!chart || !Array.isArray(datasets) || !datasets.some(ds => datasetHasPoint(ds.data))) {
+            if (chart) chart.destroy();
+            setChartCardVisible(id, false);
+            return false;
+        }
+        return true;
+    }
+
+    function setAdvancedGroupVisible(visible) {
+        const table = document.getElementById('teamDataTable');
+        if (!table) return;
+        table.classList.toggle('no-advanced', !visible);
+    }
+
+    function hasNumber(rows, key) {
+        return rows.some(r => r[key] != null && r[key] !== '' && !isNaN(Number(r[key])));
+    }
     // Files live next to this page. GitHub project pages are served from
     // /<repo>/, and that prefix changes when the repository is renamed, so
     // derive it from the current URL instead of a hardcoded repo name.
@@ -445,95 +616,460 @@ document.addEventListener('DOMContentLoaded', () => {
             data = jsonData || {};
             await initSQL(data);
             populateTeamSelector();
-            const sel = document.getElementById('teamSelector');
-            if (sel) {
-                sel.value = 'COL';
-                updateVisualization();
-            }
+            updateVisualization();
         })
         .catch(err => {
             console.error(err);
             alert('Failed to load core data files.');
         });
 
+    function getSegmentValue(group, fallback) {
+        const pressed = document.querySelector(`.segment-btn[data-group="${group}"][aria-pressed="true"]`);
+        return pressed?.value || fallback;
+    }
+
     function getViewMode() {
-        return document.querySelector('input[name="viewMode"]:checked')?.value || "team";
+        return getSegmentValue("viewMode", "team");
+    }
+
+    function getEraMode() {
+        return getSegmentValue("eraMode", "current");
     }
 
     window.onModeChange = function () {
+        if (!document.querySelector('.segment-btn[data-group="eraMode"]') || !document.getElementById('teamList')) return;
         populateTeamSelector();
         updateVisualization();
     };
 
-    function populateTeamSelector() {
-        const selector = document.getElementById('teamSelector');
-        const labelEl = document.getElementById('selectorLabel');
-        if (!selector) return;
+    function selectSegment(button) {
+        const group = button?.dataset?.group;
+        if (!group || button.getAttribute("aria-pressed") === "true") return;
+        document.querySelectorAll(`.segment-btn[data-group="${group}"]`).forEach(el => {
+            el.setAttribute("aria-pressed", el === button ? "true" : "false");
+        });
+        onModeChange();
+    }
 
+    function selectorEntries() {
         const mode = getViewMode();
-        const previous = selector.value;
-
-        selector.innerHTML = '';
+        const era = getEraMode();
+        const current = new Set(CURRENT_TEAM_ABBRS);
 
         if (mode === "franchise") {
-            if (labelEl) labelEl.textContent = "Select Franchise:";
-            Object.entries(FRANCHISES).forEach(([key, f]) => {
-                const opt = document.createElement('option');
-                opt.value = key;
-                opt.textContent = f.label;
-                selector.appendChild(opt);
-            });
-            // Prefer COL if available, else first franchise
-            if (FRANCHISES.COL) selector.value = "COL";
-            else if (selector.options.length) selector.selectedIndex = 0;
-        } else {
-            if (labelEl) labelEl.textContent = "Select Team:";
-            const teams = new Set();
-            Object.values(data).forEach(yearData => {
-                if (Array.isArray(yearData)) yearData.forEach(e => { if (e && e.team) teams.add(e.team); });
-            });
-            if (teams.size === 0) Object.keys(teamNames).forEach(t => teams.add(t));
-
-            const placeholder = document.createElement('option');
-            placeholder.value = "";
-            placeholder.textContent = "Select a team";
-            selector.appendChild(placeholder);
-
-            Array.from(teams).sort().forEach(team => {
-                const opt = document.createElement('option');
-                opt.value = team;
-                const full = teamNames[team] || team;
-                opt.textContent = `${team} · ${full}`;
-                selector.appendChild(opt);
-            });
-            selector.value = teams.has("COL") ? "COL" : "";
+            const entries = [];
+            if (era === "current" || era === "all") {
+                Object.entries(FRANCHISES).forEach(([key, f]) => entries.push([key, f.label]));
+            }
+            if (era === "historical" || era === "all") {
+                Object.entries(HISTORICAL_FRANCHISES).forEach(([key, f]) => entries.push([key, f.label]));
+            }
+            return { label: "Select Franchise:", entries };
         }
 
-        // Restore previous selection when switching modes if it still exists
-        if (previous && [...selector.options].some(o => o.value === previous)) {
-            selector.value = previous;
+        let teams;
+        if (era === "current") teams = CURRENT_TEAM_ABBRS.slice();
+        else if (era === "historical") teams = Object.keys(teamNames).filter(t => !current.has(t));
+        else teams = Object.keys(teamNames);
+        teams.sort();
+        return {
+            label: "Select Team:",
+            entries: teams.map(team => [team, `${team} · ${teamNames[team] || team}`])
+        };
+    }
+
+    function latestLogoYear(abbr) {
+        const years = uniqueLogos[abbr];
+        if (!Array.isArray(years) || !years.length) return null;
+        let max = null;
+        for (const year of years) {
+            const n = parseInt(year, 10);
+            if (Number.isNaN(n)) continue;
+            if (max === null || n > max) max = n;
+        }
+        return max;
+    }
+
+    function chipLogoAbbr(key) {
+        if (getViewMode() === "franchise") {
+            const info = franchiseByKey(key);
+            const members = info && info.members;
+            if (members && members.length) return members[members.length - 1];
+        }
+        return key;
+    }
+
+    function teamSecondaryOrNull(abbr) {
+        const color = teamSecondaryColors[abbr];
+        return (color && /^#[0-9A-F]{6}$/i.test(color)) ? color : null;
+    }
+
+    function applySelectedChipBorder(btn) {
+        const color = teamSecondaryOrNull(btn.dataset.logo || btn.dataset.key);
+        btn.style.borderColor = color ? paintOnLight(color) : "var(--team-c2-ink, #222)";
+    }
+
+    function clearChipBorder(btn) {
+        btn.style.borderColor = "";
+    }
+
+    function filterQuery() {
+        return (document.getElementById("teamFilter")?.value || "").trim().toLowerCase();
+    }
+
+    function entryMatchesQuery(key, text, query) {
+        if (!query) return true;
+        return `${key} ${text}`.toLowerCase().includes(query);
+    }
+
+    function getSelectedTeamKey() {
+        const pressed = document.querySelector('#teamList .team-chip[aria-pressed="true"]');
+        return pressed?.dataset.key || "";
+    }
+
+    function chooseSelectedKey(entries, previous) {
+        const values = new Set(entries.map(([key]) => key));
+        if (previous && values.has(previous)) return previous;
+        if (values.has("COL")) return "COL";
+        if (entries.length) return entries[0][0];
+        return "";
+    }
+
+    function renderTeamChip(key, text, selectedKey) {
+        const sep = text.indexOf(" · ");
+        const abbr = sep >= 0 ? text.slice(0, sep) : key;
+        const shortName = sep >= 0 ? text.slice(sep + 3) : text;
+        const logoAbbr = chipLogoAbbr(key);
+        const selected = key === selectedKey;
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "team-chip";
+        btn.dataset.key = key;
+        btn.dataset.logo = logoAbbr;
+        btn.dataset.label = text;
+        btn.setAttribute("aria-pressed", selected ? "true" : "false");
+
+        const img = document.createElement("img");
+        img.className = "team-chip-logo";
+        img.alt = "";
+        img.width = 40;
+        img.height = 40;
+        const year = latestLogoYear(logoAbbr);
+        if (year) {
+            img.src = `${window.basePath || ""}logos/NHL${year}/${logoAbbr}.png`;
+            img.addEventListener("error", () => { img.hidden = true; });
+        } else {
+            img.hidden = true;
+        }
+
+        const abbrEl = document.createElement("span");
+        abbrEl.className = "team-chip-abbr";
+        abbrEl.textContent = abbr;
+
+        const dot = document.createElement("span");
+        dot.className = "team-chip-sep";
+        dot.setAttribute("aria-hidden", "true");
+        dot.textContent = "·";
+
+        const nameEl = document.createElement("span");
+        nameEl.className = "team-chip-name";
+        nameEl.textContent = shortName;
+
+        btn.append(img, abbrEl, dot, nameEl);
+        if (selected) applySelectedChipBorder(btn);
+        return btn;
+    }
+
+    function applyTeamFilter() {
+        const list = document.getElementById("teamList");
+        const empty = document.getElementById("teamListEmpty");
+        if (!list) return;
+        const query = filterQuery();
+        const chips = list.querySelectorAll(".team-chip");
+        let visible = 0;
+        chips.forEach(chip => {
+            const match = entryMatchesQuery(chip.dataset.key, chip.dataset.label || chip.textContent, query);
+            chip.hidden = !match;
+            if (match) visible += 1;
+        });
+        if (empty) empty.hidden = !(query && chips.length > 0 && visible === 0);
+    }
+
+    function selectTeamChip(key) {
+        const list = document.getElementById("teamList");
+        if (!list || !key) return;
+        const chips = [...list.querySelectorAll(".team-chip")];
+        const target = chips.find(chip => chip.dataset.key === key);
+        if (!target || target.hidden) return;
+        if (target.getAttribute("aria-pressed") === "true") return;
+        chips.forEach(chip => {
+            const on = chip === target;
+            chip.setAttribute("aria-pressed", on ? "true" : "false");
+            if (on) applySelectedChipBorder(chip);
+            else clearChipBorder(chip);
+        });
+        updateVisualization();
+    }
+
+    function populateTeamSelector() {
+        const list = document.getElementById("teamList");
+        const labelEl = document.getElementById("selectorLabel");
+        const countEl = document.getElementById("eraCount");
+        if (!list) return;
+
+        const previous = getSelectedTeamKey();
+        const { label, entries } = selectorEntries();
+        if (labelEl) labelEl.textContent = label;
+
+        const selectedKey = chooseSelectedKey(entries, previous);
+        list.replaceChildren();
+        const fragment = document.createDocumentFragment();
+        entries.forEach(([key, text]) => {
+            fragment.appendChild(renderTeamChip(key, text, selectedKey));
+        });
+        list.appendChild(fragment);
+
+        if (countEl) countEl.textContent = String(entries.length);
+        applyTeamFilter();
+    }
+
+    function seasonsForAbbr(abbr) {
+        if (!seasonsByAbbr) {
+            const sets = {};
+            Object.entries(data).forEach(([year, rows]) => {
+                const n = parseInt(year, 10);
+                if (Number.isNaN(n) || !Array.isArray(rows)) return;
+                rows.forEach(entry => {
+                    const team = entry && entry.team;
+                    if (!team) return;
+                    if (!sets[team]) sets[team] = new Set();
+                    sets[team].add(n);
+                });
+            });
+            seasonsByAbbr = {};
+            Object.entries(sets).forEach(([team, set]) => {
+                seasonsByAbbr[team] = [...set].sort((a, b) => a - b);
+            });
+        }
+        return seasonsByAbbr[abbr] || [];
+    }
+
+    function logoAnchorYears(abbr) {
+        const raw = uniqueLogos[abbr];
+        if (!Array.isArray(raw)) return [];
+        const years = [];
+        raw.forEach(value => {
+            const year = parseInt(value, 10);
+            if (year >= 1917 && year <= 2100 && !years.includes(year)) years.push(year);
+        });
+        years.sort((a, b) => a - b);
+        return years;
+    }
+
+    function collapseYearRanges(years) {
+        if (!years.length) return [];
+        const ranges = [];
+        let start = years[0];
+        let prev = years[0];
+        for (let i = 1; i < years.length; i++) {
+            const year = years[i];
+            if (year === prev + 1) prev = year;
+            else {
+                ranges.push(start === prev ? String(start) : `${start}\u2013${prev}`);
+                start = prev = year;
+            }
+        }
+        ranges.push(start === prev ? String(start) : `${start}\u2013${prev}`);
+        return ranges;
+    }
+
+    // One tile per distinct logo. uniqueLogos years are the first season of each
+    // identity; later seasons keep that logo until the next anchor.
+    function identityTilesFor(abbr) {
+        const anchors = logoAnchorYears(abbr);
+        const seasons = seasonsForAbbr(abbr);
+        if (!anchors.length) {
+            const ranges = seasons.length ? collapseYearRanges(seasons) : [abbr];
+            return [{
+                abbr,
+                logoYear: seasons.length ? seasons[seasons.length - 1] : null,
+                seasons: seasons.slice(),
+                ranges,
+                label: ranges.join(', ')
+            }];
+        }
+        const buckets = anchors.map(year => ({ year, seasons: [] }));
+        seasons.forEach(season => {
+            let idx = -1;
+            for (let i = 0; i < anchors.length; i++) {
+                if (anchors[i] <= season) idx = i;
+                else break;
+            }
+            if (idx < 0) idx = 0;
+            buckets[idx].seasons.push(season);
+        });
+        return buckets.map(bucket => {
+            const ranges = bucket.seasons.length ? collapseYearRanges(bucket.seasons) : [String(bucket.year)];
+            return {
+                abbr,
+                logoYear: bucket.year,
+                seasons: bucket.seasons,
+                ranges,
+                label: ranges.join(', ')
+            };
+        });
+    }
+
+    function buildIdentityTile(tile) {
+        const mark = document.createElement('figure');
+        mark.className = 'identity-mark';
+
+        const windowEl = document.createElement('div');
+        windowEl.className = 'identity-tile';
+        const border = teamTertiaryColors[tile.abbr];
+        windowEl.style.borderColor = (border && /^#[0-9A-F]{6}$/i.test(border)) ? border : '#d0d0d0';
+
+        const caption = document.createElement('figcaption');
+        caption.className = 'identity-years';
+        (tile.ranges || []).forEach(text => {
+            const line = document.createElement('span');
+            line.className = 'identity-year-range';
+            line.textContent = text;
+            caption.appendChild(line);
+        });
+
+        const yearsToTry = [];
+        if (tile.logoYear != null) yearsToTry.push(tile.logoYear);
+        (tile.seasons || []).forEach(year => {
+            if (!yearsToTry.includes(year)) yearsToTry.push(year);
+        });
+
+        if (!yearsToTry.length) {
+            mark.append(windowEl, caption);
+            return mark;
+        }
+
+        const img = document.createElement('img');
+        img.className = 'team-logo';
+        img.alt = tile.label === tile.abbr ? tile.abbr : `${tile.abbr} ${tile.label}`;
+
+        let attempt = 0;
+        let failed = false;
+        const tryLogo = () => {
+            if (attempt >= yearsToTry.length) {
+                img.remove();
+                failed = true;
+                if ((!tile.seasons || !tile.seasons.length) && mark.isConnected) mark.remove();
+                return;
+            }
+            const year = yearsToTry[attempt++];
+            img.src = `${window.basePath || ''}logos/NHL${year}/${tile.abbr}.png`;
+        };
+        img.addEventListener('error', tryLogo);
+        img.addEventListener('load', () => pinLogoStrip(mark.parentElement));
+        windowEl.appendChild(img);
+        mark.append(windowEl, caption);
+        tryLogo();
+        if (failed && (!tile.seasons || !tile.seasons.length)) return null;
+        return mark;
+    }
+
+    function renderIdentityTiles(logosEl, abbrs) {
+        logosEl.replaceChildren();
+        const nodes = [];
+        abbrs.forEach(abbr => {
+            identityTilesFor(abbr).forEach(tile => {
+                const node = buildIdentityTile(tile);
+                if (node) nodes.push(node);
+            });
+        });
+        nodes.forEach(node => logosEl.appendChild(node));
+        // Keep the current identity in view when a long chain overflows.
+        logosEl.dataset.followLatest = '1';
+        logosEl.dataset.userScroll = '0';
+        if (!logosEl.dataset.scrollBound) {
+            logosEl.dataset.scrollBound = '1';
+            const noteUser = () => { logosEl.dataset.userScroll = '1'; };
+            logosEl.addEventListener('pointerdown', noteUser);
+            logosEl.addEventListener('wheel', noteUser, { passive: true });
+            logosEl.addEventListener('scroll', () => {
+                if (logosEl.dataset.pinning === '1' || logosEl.dataset.userScroll !== '1') return;
+                const max = logosEl.scrollWidth - logosEl.clientWidth;
+                logosEl.dataset.followLatest = (max - logosEl.scrollLeft < 32) ? '1' : '0';
+            });
+        }
+        pinLogoStrip(logosEl);
+        requestAnimationFrame(() => pinLogoStrip(logosEl));
+    }
+
+    function pinLogoStrip(logosEl) {
+        if (!logosEl || logosEl.dataset.followLatest === '0') return;
+        const max = Math.max(0, logosEl.scrollWidth - logosEl.clientWidth);
+        if (Math.abs(logosEl.scrollLeft - max) < 2) return;
+        logosEl.dataset.pinning = '1';
+        logosEl.scrollLeft = max;
+        requestAnimationFrame(() => { logosEl.dataset.pinning = '0'; });
+    }
+
+    function syncIdentityBarOffset() {
+        const bar = document.querySelector('.team-header');
+        const barHeight = bar ? Math.ceil(bar.getBoundingClientRect().height) : 0;
+        document.documentElement.style.setProperty('--identity-bar-height', `${barHeight}px`);
+        const groupCell = document.querySelector('#teamDataTable .group-header th');
+        if (groupCell) {
+            const groupHeight = Math.ceil(groupCell.getBoundingClientRect().height);
+            document.documentElement.style.setProperty('--group-header-height', `${groupHeight}px`);
+        }
+        pinLogoStrip(document.getElementById('teamLogos'));
+        syncTableHeaderPin();
+        syncRailViewport();
+    }
+
+    function syncTableHeaderPin() {
+        const table = document.querySelector('.table-container');
+        const bar = document.querySelector('.team-header');
+        if (!table || !bar) return;
+        const overlap = Math.max(0, Math.round(bar.getBoundingClientRect().bottom - table.getBoundingClientRect().top));
+        const next = overlap + 'px';
+        if (document.documentElement.style.getPropertyValue('--table-header-stick').trim() !== next) {
+            document.documentElement.style.setProperty('--table-header-stick', next);
+        }
+    }
+
+    function syncRailViewport() {
+        const rail = document.querySelector('.team-rail');
+        const bar = document.querySelector('.team-header');
+        if (!rail || !bar) return;
+        const barBottom = bar.getBoundingClientRect().bottom;
+        const railTop = rail.getBoundingClientRect().top;
+        const topEdge = Math.max(railTop, barBottom);
+        const available = Math.max(240, Math.floor(window.innerHeight - topEdge));
+        const px = `${available}px`;
+        if (rail.style.height !== px) {
+            rail.style.height = px;
+            rail.style.maxHeight = px;
         }
     }
 
     window.updateVisualization = function () {
-        const selected = document.getElementById('teamSelector').value;
+        const selected = getSelectedTeamKey();
         const teamNameEl = document.getElementById('teamName');
         const teamAbbrEl = document.getElementById('teamAbbreviation');
         const logosEl = document.getElementById('teamLogos');
         const mode = getViewMode();
 
-        document.body.style.backgroundColor = defaultColors.c1;
-        document.querySelector('h1.header').style.color = defaultColors.c2;
-        document.querySelector('.team-header').style.color = defaultColors.c2;
-
         if (!selected) {
+            applyTeamChrome(defaultColors.c1, defaultColors.c2);
             teamNameEl.textContent = '';
             teamAbbrEl.textContent = '';
-            logosEl.innerHTML = '';
+            logosEl.replaceChildren();
+            syncIdentityBarOffset();
             document.querySelector('#teamDataTable tbody').innerHTML = '';
             ['trendChart', 'scatterChart', 'playoffWinsHistogram', 'radarChart'].forEach(id => {
-                const c = Chart.getChart(id); if (c) c.destroy();
+                setChartCardVisible(id, false);
             });
+            setAdvancedGroupVisible(false);
             document.getElementById('insightsPanel').innerHTML = '';
             return;
         }
@@ -541,7 +1077,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Resolve Team vs Franchise
         let abbrs, displayName, primaryAbbr, franchiseInfo = null;
         if (mode === "franchise") {
-            franchiseInfo = FRANCHISES[selected];
+            franchiseInfo = franchiseByKey(selected);
             if (!franchiseInfo) return;
             abbrs = franchiseInfo.members;
             displayName = franchiseInfo.name;
@@ -567,38 +1103,17 @@ document.addEventListener('DOMContentLoaded', () => {
             teamAbbrEl.textContent = primaryAbbr;
         }
 
-        // Logos: collect unique years across all franchise members (or single team)
-        logosEl.innerHTML = '';
-        const logoYears = new Set();
-        abbrs.forEach(ab => {
-            (uniqueLogos[ab] || []).forEach(y => logoYears.add(parseInt(y)));
-        });
-        [...logoYears].sort((a, b) => a - b).forEach(year => {
-            const img = document.createElement('img');
-            img.className = 'team-logo';
-            img.style.borderColor = teamTertiaryColors[primaryAbbr] || '#fff';
-            // Try primary first, then other franchise members on 404
-            let tryIdx = 0;
-            const candidates = [primaryAbbr, ...abbrs.filter(a => a !== primaryAbbr)];
-            const tryLogo = () => {
-                if (tryIdx >= candidates.length) {
-                    img.style.display = 'none';
-                    return;
-                }
-                img.src = `${window.basePath || ''}logos/NHL${year}/${candidates[tryIdx++]}.png`;
-            };
-            img.onerror = tryLogo;
-            tryLogo();
-            logosEl.appendChild(img);
-        });
+        // Oldest identity first. Franchise mode walks members in that same order.
+        const logoAbbrs = mode === 'franchise' ? abbrs.slice() : [primaryAbbr];
+        renderIdentityTiles(logosEl, logoAbbrs);
+        syncIdentityBarOffset();
 
-        const primary    = (teamColors[primaryAbbr] && /^#[0-9A-F]{6}$/i.test(teamColors[primaryAbbr])) ? teamColors[primaryAbbr] : defaultColors.c1;
-        const secondary  = (teamSecondaryColors[primaryAbbr] && /^#[0-9A-F]{6}$/i.test(teamSecondaryColors[primaryAbbr])) ? teamSecondaryColors[primaryAbbr] : defaultColors.c2;
-        const quaternary = (teamQuaternaryColors[primaryAbbr] && /^#[0-9A-F]{6}$/i.test(teamQuaternaryColors[primaryAbbr])) ? teamQuaternaryColors[primaryAbbr] : defaultColors.c4;
-
-        document.body.style.backgroundColor = primary;
-        document.querySelector('h1.header').style.color = secondary;
-        document.querySelector('.team-header').style.color = secondary;
+        const { primary, secondary, tertiary, quaternary, quinary } = resolveTeamColors(primaryAbbr);
+        applyTeamChrome(primary, secondary);
+        const ptsColor = paintOnLight(secondary);
+        const xgfColor = paintOnLight(xgfLineColor(tertiary, quaternary, secondary));
+        const cfColor = paintOnLight(quinary);
+        const scatterStroke = strokeOnFill(secondary, primary);
 
         const orderMap = {
             year: 'year', rs_gp: 'rs_gp', rs_w: 'rs_w', rs_l: 'rs_l', rs_otl: 'rs_otl',
@@ -677,105 +1192,164 @@ document.addEventListener('DOMContentLoaded', () => {
         const xgf = chron.map(r => r.xgf_pct != null ? +Number(r.xgf_pct).toFixed(1) : null);
         const cf = chron.map(r => r.cf_pct != null ? +Number(r.cf_pct).toFixed(1) : null);
         const pWins = chron.map(r => r.playoff_wins != null ? r.playoff_wins : null);
+        const hasPts = hasNumber(chron, 'rs_pts_pct');
+        const hasXgf = hasNumber(chron, 'xgf_pct');
+        const hasCf = hasNumber(chron, 'cf_pct');
+        const hasFf = hasNumber(chron, 'ff_pct');
+        const hasAdvanced = hasXgf || hasCf || hasFf;
+        const hasPlayoffWins = hasNumber(chron, 'playoff_wins');
+        setAdvancedGroupVisible(hasAdvanced);
 
-        // Adaptive Y range for PTS% / xGF% / CF%
-        const yRange = computeRange(
-            [...ptsPct, ...xgf, ...cf],
-            { padding: 0.10, minSpan: 12 }
-        );
-
-        // Trend
-        new Chart(document.getElementById('trendChart'), {
-            type: 'bar',
-            data: {
-                labels: years,
-                datasets: [
-                    { type: 'line', label: 'PTS%', data: ptsPct, borderColor: quaternary, backgroundColor: quaternary, yAxisID: 'y', tension: 0.2, pointRadius: 2 },
-                    { type: 'line', label: 'xGF%', data: xgf, borderColor: secondary, backgroundColor: secondary, yAxisID: 'y', tension: 0.2, pointRadius: 2 },
-                    { type: 'line', label: 'CF%', data: cf, borderColor: '#888', backgroundColor: '#888', yAxisID: 'y', tension: 0.2, pointRadius: 2, borderDash: [4,2] },
-                    { type: 'bar', label: 'Playoff Wins', data: pWins, backgroundColor: primary + '99', yAxisID: 'y1' }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: { title: { display: true, text: 'Regular Season Form · Process Metrics · Playoff Results', font: { size: 14 } }, legend: { position: 'top' } },
-                scales: {
-                    y: {
-                        type: 'linear', position: 'left',
-                        title: { display: true, text: 'PTS% / xGF% / CF%' },
-                        min: yRange.min, max: yRange.max
-                    },
-                    y1: {
-                        type: 'linear', position: 'right',
-                        title: { display: true, text: 'Playoff Wins' },
-                        min: 0, max: Math.max(16, Math.ceil((Math.max(...pWins.filter(v=>v!=null), 0) || 0) + 1)),
-                        grid: { drawOnChartArea: false }
+        // Trend stays when PTS% or playoff wins exist. Advanced lines are omitted
+        // when this selection has no advanced-stat season, so empty series are not drawn.
+        if (setChartCardVisible('trendChart', hasPts || hasPlayoffWins)) {
+            const trendDatasets = [
+                { type: 'bar', label: 'Playoff Wins', data: pWins, backgroundColor: primary, borderColor: primary, borderWidth: 0, yAxisID: 'y1', order: 2 },
+                { type: 'line', label: 'PTS%', data: ptsPct, borderColor: ptsColor, backgroundColor: ptsColor, pointBackgroundColor: ptsColor, yAxisID: 'y', tension: 0.2, pointRadius: 2, order: 1 }
+            ];
+            const yTitleParts = ['PTS%'];
+            const yValues = [...ptsPct];
+            if (hasXgf) {
+                trendDatasets.push({ type: 'line', label: 'xGF%', data: xgf, borderColor: xgfColor, backgroundColor: xgfColor, pointBackgroundColor: xgfColor, yAxisID: 'y', tension: 0.2, pointRadius: 2, order: 1 });
+                yTitleParts.push('xGF%');
+                yValues.push(...xgf);
+            }
+            if (hasCf) {
+                trendDatasets.push({ type: 'line', label: 'CF%', data: cf, borderColor: cfColor, backgroundColor: cfColor, pointBackgroundColor: cfColor, yAxisID: 'y', tension: 0.2, pointRadius: 2, borderDash: [4, 2], order: 1 });
+                yTitleParts.push('CF%');
+                yValues.push(...cf);
+            }
+            const yRange = computeRange(yValues, { padding: 0.10, minSpan: 12 });
+            publishChart('trendChart', new Chart(document.getElementById('trendChart'), {
+                type: 'bar',
+                data: { labels: years, datasets: trendDatasets },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: 'Regular Season Form · Process Metrics · Playoff Results', font: { size: 14 } }, legend: { position: 'top' } },
+                    scales: {
+                        y: {
+                            type: 'linear', position: 'left',
+                            title: { display: true, text: yTitleParts.join(' / ') },
+                            min: yRange.min, max: yRange.max
+                        },
+                        y1: {
+                            type: 'linear', position: 'right',
+                            title: { display: true, text: 'Playoff Wins' },
+                            min: 0, max: Math.max(16, Math.ceil((Math.max(...pWins.filter(v=>v!=null), 0) || 0) + 1)),
+                            grid: { drawOnChartArea: false }
+                        }
                     }
                 }
-            }
-        });
+            }));
+        }
 
-        // Scatter
-        const scatterData = chron.filter(r => r.xgf_pct != null).map(r => ({
+        // Scatter: hide the card when no season has an xGF% value.
+        const scatterData = hasXgf ? chron.filter(r => r.xgf_pct != null).map(r => ({
             x: +Number(r.xgf_pct).toFixed(1),
             y: r.playoff_wins || 0,
             r: r.rs_pts_pct != null ? Math.max(4, r.rs_pts_pct * 40) : 6
-        }));
-        const xRange = computeRange(
-            scatterData.map(d => d.x),
-            { padding: 0.12, minSpan: 8 }
-        );
-        new Chart(document.getElementById('scatterChart'), {
-            type: 'bubble',
-            data: { datasets: [{ label: 'Season', data: scatterData, backgroundColor: quaternary + '88', borderColor: quaternary }] },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: { title: { display: true, text: 'xGF% vs Playoff Wins (bubble = PTS%)', font: { size: 14 } }, legend: { display: false } },
-                scales: {
-                    x: {
-                        title: { display: true, text: 'xGF%' },
-                        min: xRange.min, max: xRange.max
-                    },
-                    y: {
-                        title: { display: true, text: 'Playoff Wins' },
-                        min: 0,
-                        max: Math.max(16, Math.ceil((Math.max(...scatterData.map(d => d.y), 0) || 0) + 1))
+        })) : [];
+        if (setChartCardVisible('scatterChart', hasXgf && scatterData.length > 0)) {
+            const xRange = computeRange(
+                scatterData.map(d => d.x),
+                { padding: 0.12, minSpan: 8 }
+            );
+            publishChart('scatterChart', new Chart(document.getElementById('scatterChart'), {
+                type: 'bubble',
+                data: { datasets: [{ label: 'Season', data: scatterData, backgroundColor: primary + '99', borderColor: scatterStroke, borderWidth: 2 }] },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: 'xGF% vs Playoff Wins (bubble = PTS%)', font: { size: 14 } }, legend: { display: false } },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'xGF%' },
+                            min: xRange.min, max: xRange.max
+                        },
+                        y: {
+                            title: { display: true, text: 'Playoff Wins' },
+                            min: 0,
+                            max: Math.max(16, Math.ceil((Math.max(...scatterData.map(d => d.y), 0) || 0) + 1))
+                        }
                     }
                 }
-            }
-        });
+            }));
+        }
 
-        // Histogram
+        // Histogram: hide only when no playoff-win values exist.
         const winCounts = {};
-        chron.forEach(r => {
-            const w = r.playoff_wins;
-            if (w != null) winCounts[w] = (winCounts[w] || 0) + 1;
-        });
+        if (hasPlayoffWins) {
+            chron.forEach(r => {
+                const w = r.playoff_wins;
+                if (w != null && !isNaN(Number(w))) winCounts[w] = (winCounts[w] || 0) + 1;
+            });
+        }
         const histLabels = Object.keys(winCounts).map(Number).sort((a,b)=>a-b);
-        new Chart(document.getElementById('playoffWinsHistogram'), {
-            type: 'bar',
-            data: {
-                labels: histLabels,
-                datasets: [{ label: 'Seasons', data: histLabels.map(w => winCounts[w]), backgroundColor: primary + 'aa', borderColor: primary, borderWidth: 1 }]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: { title: { display: true, text: (mode === 'franchise' ? 'Playoff Wins Distribution (Franchise History)' : 'Playoff Wins Distribution (Team History)'), font: { size: 14 } }, legend: { display: false } },
-                scales: { x: { title: { display: true, text: 'Playoff Wins' } }, y: { title: { display: true, text: 'Seasons' }, beginAtZero: true, ticks: { stepSize: 1 } } }
-            }
-        });
+        const winVals = chron.map(r => r.playoff_wins).filter(v => v != null && !isNaN(v)).map(Number);
+        const meanWins = winVals.length ? winVals.reduce((a, b) => a + b, 0) / winVals.length : null;
+        const meanColor = paintOnLight(secondary);
+        if (setChartCardVisible('playoffWinsHistogram', hasPlayoffWins && histLabels.length > 0)) {
+            publishChart('playoffWinsHistogram', new Chart(document.getElementById('playoffWinsHistogram'), {
+                type: 'bar',
+                data: {
+                    labels: histLabels,
+                    datasets: [{ label: 'Seasons', data: histLabels.map(w => winCounts[w]), backgroundColor: primary, borderColor: primary, borderWidth: 1 }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: { title: { display: true, text: (mode === 'franchise' ? 'Playoff Wins Distribution (Franchise History)' : 'Playoff Wins Distribution (Team History)'), font: { size: 14 } }, legend: { display: false } },
+                    scales: { x: { title: { display: true, text: 'Playoff Wins' } }, y: { title: { display: true, text: 'Seasons' }, beginAtZero: true, ticks: { stepSize: 1 } } }
+                },
+                plugins: [{
+                    id: 'playoffMeanLine',
+                    afterDatasetsDraw(chart) {
+                        if (meanWins == null || !histLabels.length) return;
+                        const { ctx, chartArea, scales } = chart;
+                        if (!scales.x || !chartArea || chartArea.width < 2) return;
+                        const px = histLabels.map(label => scales.x.getPixelForValue(label));
+                        if (px.some(v => !Number.isFinite(v))) return;
+                        let x = px[0];
+                        if (histLabels.length > 1 && meanWins > histLabels[0]) {
+                            const last = histLabels.length - 1;
+                            if (meanWins >= histLabels[last]) x = px[last];
+                            else {
+                                for (let i = 0; i < last; i++) {
+                                    if (meanWins >= histLabels[i] && meanWins <= histLabels[i + 1]) {
+                                        const span = histLabels[i + 1] - histLabels[i];
+                                        const t = span ? (meanWins - histLabels[i]) / span : 0;
+                                        x = px[i] + t * (px[i + 1] - px[i]);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.strokeStyle = meanColor;
+                        ctx.lineWidth = 2;
+                        ctx.moveTo(x, chartArea.top);
+                        ctx.lineTo(x, chartArea.bottom);
+                        ctx.stroke();
+                        ctx.fillStyle = meanColor;
+                        ctx.font = '600 11px sans-serif';
+                        ctx.textBaseline = 'top';
+                        const rightSide = x > (chartArea.left + chartArea.right) / 2;
+                        ctx.textAlign = rightSide ? 'right' : 'left';
+                        ctx.fillText(`Mean ${meanWins.toFixed(1)}`, rightSide ? x - 6 : x + 6, chartArea.top + 2);
+                        ctx.restore();
+                    }
+                }]
+            }));
+        }
 
         // ===== RADAR (real advanced data only) =====
         const modern = chron.filter(r => r.xgf_pct != null && r.year >= 2008);
         const lastN = modern.slice(-5);
 
-        const radarCanvas = document.getElementById('radarChart');
-        const radarParent = radarCanvas ? radarCanvas.parentElement : null;
-
-        if (lastN.length === 0) {
-            if (radarParent) radarParent.style.display = 'none';
+        if (!hasXgf || lastN.length === 0) {
+            setChartCardVisible('radarChart', false);
         } else {
-            if (radarParent) radarParent.style.display = '';
+            setChartCardVisible('radarChart', true);
+            const radarCanvas = document.getElementById('radarChart');
 
             const avg = (arr, key) => {
                 const vals = arr.map(r => r[key]).filter(v => v != null && !isNaN(v));
@@ -815,16 +1389,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 return radarValues[i];
             });
 
-            new Chart(radarCanvas, {
+            publishChart('radarChart', new Chart(radarCanvas, {
                 type: 'radar',
                 data: {
                     labels: cleanLabels,
                     datasets: [{
                         label: `Last ${lastN.length} Seasons Avg`,
                         data: cleanValues,
-                        backgroundColor: quaternary + '44',
-                        borderColor: quaternary,
-                        pointBackgroundColor: quaternary,
+                        backgroundColor: secondary + '2e',
+                        borderColor: primary,
+                        pointBackgroundColor: primary,
+                        pointBorderColor: primary,
                         borderWidth: 2,
                         pointRadius: 4
                     }]
@@ -868,125 +1443,111 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     }
                 }
-            });
+            }));
         }
 
-        // ===== GROUPED INSIGHTS =====
+        // ===== INSIGHT STRIPS =====
         const insightsEl = document.getElementById('insightsPanel');
         if (insightsEl) {
-            let championsCount = rows.filter(r => r.elim_rank === 1).length;
-            if (mode === 'team' && primaryAbbr === 'MTL') championsCount = 23;   // hard-coded official NHL-era total
-
-            const realChampions = rows.filter(r => r.elim_rank === 1);
-            const finalists     = rows.filter(r => r.elim_rank != null && r.elim_rank <= 2);
-            const deepRuns      = rows.filter(r => r.elim_rank != null && r.elim_rank <= 4);
-
-            const appearances = rows.filter(r => {
-                if (r.elim_rank == null) return false;
-                return r.elim_rank <= getPlayoffFieldSize(r.year);
+            // A finish counts only when elim_rank is present, it meets the cut,
+            // and that year's field was at least as large as the cut. Cups are
+            // elim_rank 1 in any field. elim_rank 8 in a 4-team year is not a
+            // Final 8. If the selection never played a season in which the
+            // cut existed, the count is an em dash rather than 0.
+            const atCut = (maxRank) => rows.filter(r => {
+                if (r.elim_rank == null || r.year == null) return false;
+                const rank = Number(r.elim_rank);
+                const field = getPlayoffFieldSize(Number(r.year));
+                if (!Number.isFinite(rank) || rank > field || field < maxRank) return false;
+                return rank <= maxRank;
             });
+            const gameWins = (arr) => arr.reduce((sum, r) => sum + (Number(r.playoff_wins) || 0), 0);
 
-            const modernRows = rows.filter(r => r.xgf_pct != null);
+            const cupSeasons = rows.filter(r => {
+                if (r.elim_rank == null || r.year == null) return false;
+                return Number(r.elim_rank) === 1;
+            });
+            const finalSeasons = atCut(2);
+            const final4Seasons = atCut(4);
+            const final8Seasons = atCut(8);
+            const final16Seasons = atCut(16);
 
-            const avg = (arr, key, scale = 1) => {
-                if (!Array.isArray(arr)) return '—';
-                const vals = arr.map(r => r[key]).filter(v => v != null && !isNaN(v));
-                return vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length * scale).toFixed(1) : '—';
-            };
-
-            let corrXGF = 'n/a';
-            if (modernRows.length >= 5) {
-                const xs = modernRows.map(r => r.xgf_pct);
-                const ys = modernRows.map(r => r.playoff_wins || 0);
-                const n = xs.length;
-                const meanX = xs.reduce((a,b)=>a+b,0)/n;
-                const meanY = ys.reduce((a,b)=>a+b,0)/n;
-                let num=0, denX=0, denY=0;
-                for (let i=0;i<n;i++) {
-                    const dx = xs[i]-meanX, dy = ys[i]-meanY;
-                    num += dx*dy; denX += dx*dx; denY += dy*dy;
+            const wins = gameWins(rows);
+            const seasonRows = runQuery(
+                `SELECT DISTINCT season AS year FROM regular_season WHERE team_abbr IN (${placeholders})`,
+                abbrs
+            );
+            const seasonCount = seasonRows.length;
+            // A cut was possible if any selected season, regular or playoff,
+            // had a field at least as large as the cut. Totals Seasons stays
+            // the regular-season count above.
+            const seasonYears = new Set();
+            seasonRows.forEach(r => {
+                const year = Number(r.year);
+                if (Number.isFinite(year)) seasonYears.add(year);
+            });
+            rows.forEach(r => {
+                const year = Number(r.year);
+                if (Number.isFinite(year)) seasonYears.add(year);
+            });
+            const cutPossible = (minField) => {
+                for (const year of seasonYears) {
+                    if (getPlayoffFieldSize(year) >= minField) return true;
                 }
-                const r = (denX && denY) ? num / Math.sqrt(denX*denY) : 0;
-                corrXGF = r.toFixed(2);
-            }
+                return false;
+            };
+            const depthCount = (minField, seasons) => (
+                cutPossible(minField) ? seasons.length : '—'
+            );
 
-            const careerWins = rows.reduce((s, r) => s + (r.playoff_wins || 0), 0);
+            const insightCell = (kind, label, value) =>
+                `<div class="insight-cell" data-insight="${kind}"><div class="insight-label">${label}</div><div class="insight-value">${value}</div></div>`;
 
-            insightsEl.innerHTML = `
-                <div class="insight-group champions">
-                    <div class="insight-group-title">Stanley Cup Champions (elim_rank = 1)</div>
-                    <div class="insight-group-cards">
-                        <div class="insight-card">
-                            <div class="insight-value">${championsCount}</div>
-                            <div class="insight-label">Stanley Cups</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(realChampions, 'rs_pts_pct', 100)}%</div>
-                            <div class="insight-label">Avg PTS%</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(realChampions.filter(r=>r.xgf_pct!=null), 'xgf_pct')}%</div>
-                            <div class="insight-label">Avg xGF%</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="insight-group finalists">
-                    <div class="insight-group-title">Cup Finalists (elim_rank ≤ 2)</div>
-                    <div class="insight-group-cards">
-                        <div class="insight-card">
-                            <div class="insight-value">${finalists.length}</div>
-                            <div class="insight-label">Finals Appearances</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(finalists, 'rs_pts_pct', 100)}%</div>
-                            <div class="insight-label">Avg PTS%</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(finalists.filter(r=>r.xgf_pct!=null), 'xgf_pct')}%</div>
-                            <div class="insight-label">Avg xGF%</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="insight-group deepruns">
-                    <div class="insight-group-title">Deep Runs (elim_rank ≤ 4)</div>
-                    <div class="insight-group-cards">
-                        <div class="insight-card">
-                            <div class="insight-value">${deepRuns.length}</div>
-                            <div class="insight-label">Deep-Run Seasons</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(deepRuns, 'rs_pts_pct', 100)}%</div>
-                            <div class="insight-label">Avg PTS%</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${avg(deepRuns.filter(r=>r.xgf_pct!=null), 'xgf_pct')}%</div>
-                            <div class="insight-label">Avg xGF%</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="insight-group context">
-                    <div class="insight-group-title">Overall</div>
-                    <div class="insight-group-cards">
-                        <div class="insight-card">
-                            <div class="insight-value">${appearances.length}</div>
-                            <div class="insight-label">Playoff Appearances</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${careerWins}</div>
-                            <div class="insight-label">Playoff Wins</div>
-                        </div>
-                        <div class="insight-card">
-                            <div class="insight-value">${corrXGF}</div>
-                            <div class="insight-label">xGF%–Wins Correlation</div>
-                        </div>
-                    </div>
-                </div>
-            `;
+            insightsEl.innerHTML = `<div class="insight-strip">${[
+                insightCell('cups', 'Cups', depthCount(1, cupSeasons)),
+                insightCell('finals', 'Finals', depthCount(2, finalSeasons)),
+                insightCell('final4', 'Final 4', depthCount(4, final4Seasons)),
+                insightCell('final8', 'Final 8', depthCount(8, final8Seasons)),
+                insightCell('final16', 'Final 16', depthCount(16, final16Seasons)),
+                insightCell('seasons', 'Seasons', seasonCount),
+                insightCell('wins', 'Playoff wins', wins)
+            ].join('')}</div>`;
         }
+        syncIdentityBarOffset();
     };
+
+    const identityBar = document.querySelector('.team-header');
+    const groupHeaderRow = document.querySelector('#teamDataTable .group-header');
+    if (window.ResizeObserver && (identityBar || groupHeaderRow)) {
+        const stickyWatch = new ResizeObserver(() => syncIdentityBarOffset());
+        if (identityBar) stickyWatch.observe(identityBar);
+        if (groupHeaderRow) stickyWatch.observe(groupHeaderRow);
+    } else {
+        window.addEventListener('resize', syncIdentityBarOffset);
+    }
+    window.addEventListener('scroll', () => {
+        syncTableHeaderPin();
+        syncRailViewport();
+    }, { passive: true });
+    window.addEventListener('resize', () => {
+        syncTableHeaderPin();
+        syncRailViewport();
+    });
+
+    document.querySelector(".team-rail")?.addEventListener("click", (event) => {
+        const segmentBtn = event.target.closest(".segment-btn");
+        if (segmentBtn) selectSegment(segmentBtn);
+    });
+
+    document.getElementById("teamList")?.addEventListener("click", (event) => {
+        const btn = event.target.closest(".team-chip");
+        if (!btn) return;
+        selectTeamChip(btn.dataset.key);
+    });
+
+    document.getElementById("teamFilter")?.addEventListener("input", () => {
+        applyTeamFilter();
+    });
 
     document.querySelectorAll('.column-header .sortable').forEach(th => {
         th.addEventListener('click', () => {

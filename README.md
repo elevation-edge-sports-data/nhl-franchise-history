@@ -1,10 +1,15 @@
-# NHL Playoff Team Stats
+# NHL Franchise History
 
-**Live Demo:** [https://elevation-edge-sports-data.github.io/nhl-team-history/](https://elevation-edge-sports-data.github.io/nhl-team-history/)
+**Live Demo:** [https://elevation-edge-sports-data.github.io/nhl-franchise-history/](https://elevation-edge-sports-data.github.io/nhl-franchise-history/)
 
 Interactive historical NHL Stanley Cup Playoff statistics for every team, enhanced with regular season and advanced metrics joined via SQL.
 
 Default team: **COL** (Colorado Avalanche).
+
+## Features
+
+- **Mode:** Team | Franchise
+- **Era:** Current | Historical | All
 
 ## Table Structure
 
@@ -40,7 +45,7 @@ All charts are powered by the full joined dataset (regular season + advanced + p
 
 ## How SQL Is Used
 
-Data lives in three normalized tables inside an in-browser SQLite database (sql.js):
+Data lives in three normalized tables inside an in-browser SQLite database (sql.js). Schema, the wide-view query, and franchise continuity are in [docs/sql-reference.md](docs/sql-reference.md).
 
 ```
 playoff_results   -- elimination order / rank / wins

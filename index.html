@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NHL Playoff Team Stats | Elevation Edge Sports Data</title>
+    <title>NHL Franchise History | Elevation Edge Sports Data</title>
     <meta name="description" content="Interactive NHL team analytics: regular season, advanced possession metrics (xGF%, CF%, FF%), and Stanley Cup Playoff history powered by in-browser SQL. Supports Team and Franchise modes (e.g. QUE → COL).">
     <link rel="stylesheet" href="styles.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -11,37 +11,63 @@
 </head>
 <body>
     <div class="container">
-        <h1 class="header">NHL Playoff Team Stats</h1>
+        <h1 class="header">NHL Franchise History</h1>
         <div class="team-header">
             <span id="teamAbbreviation"></span>
             <div id="teamLogos"></div>
             <h2 id="teamName"></h2>
         </div>
 
-        <!-- KEY INSIGHTS – 2×2 groups -->
+        <aside class="team-rail">
+            <div class="selector-container">
+                <div class="mode-block">
+                    <span class="mode-label" id="modeLabel">Mode</span>
+                    <div class="segment" role="group" aria-labelledby="modeLabel">
+                        <button type="button" class="segment-btn" data-group="viewMode" value="team" aria-pressed="true">Team</button>
+                        <button type="button" class="segment-btn" data-group="viewMode" value="franchise" aria-pressed="false">Franchise</button>
+                    </div>
+                </div>
+                <div class="mode-block">
+                    <div class="mode-caption">
+                        <span class="mode-label" id="eraLabel">Era</span>
+                        <span id="eraCount">32</span>
+                    </div>
+                    <div class="segment" role="group" aria-labelledby="eraLabel">
+                        <button type="button" class="segment-btn" data-group="eraMode" value="current" aria-pressed="true">Current</button>
+                        <button type="button" class="segment-btn" data-group="eraMode" value="historical" aria-pressed="false">Historical</button>
+                        <button type="button" class="segment-btn" data-group="eraMode" value="all" aria-pressed="false">All</button>
+                    </div>
+                </div>
+                <div class="team-picker">
+                    <div class="team-picker-bar">
+                        <span id="selectorLabel" class="selector-label">Select Team:</span>
+                        <input type="text" id="teamFilter" placeholder="Filter" aria-label="Filter" autocomplete="off" spellcheck="false">
+                    </div>
+                </div>
+            </div>
+            <p id="teamListEmpty" class="team-list-empty" hidden>No matches</p>
+            <div id="teamList" role="group" aria-labelledby="selectorLabel"></div>
+        </aside>
+
+        <div class="page-main">
         <div id="insightsPanel" class="insights-panel"></div>
 
-        <div class="table-area">
-            <div class="selector-container">
-                <div class="selector-row">
-                    <label for="teamSelector" id="selectorLabel">Select Team:</label>
-                    <select id="teamSelector" onchange="updateVisualization()">
-                        <option value="">Select a team</option>
-                    </select>
-                </div>
-                <div class="mode-toggle" role="group" aria-label="View mode">
-                    <span class="mode-label">Mode:</span>
-                    <label class="mode-option">
-                        <input type="radio" name="viewMode" value="team" checked onchange="onModeChange()">
-                        Team
-                    </label>
-                    <label class="mode-option">
-                        <input type="radio" name="viewMode" value="franchise" onchange="onModeChange()">
-                        Franchise
-                    </label>
-                </div>
-                <span class="hint">Sort any column · All data joined via SQL</span>
+        <div class="charts-container">
+            <div class="chart chart-wide">
+                <canvas id="trendChart"></canvas>
             </div>
+            <div class="chart">
+                <canvas id="scatterChart"></canvas>
+            </div>
+            <div class="chart">
+                <canvas id="playoffWinsHistogram"></canvas>
+            </div>
+            <div class="chart">
+                <canvas id="radarChart"></canvas>
+            </div>
+        </div>
+
+        <div class="table-area">
             <div class="table-container">
                 <table id="teamDataTable">
                     <thead>
@@ -74,89 +100,8 @@
                     <tbody></tbody>
                 </table>
             </div>
-            <div class="sql-info">
-                Powered by <strong>SQL</strong> (sql.js / SQLite) ·
-                Schema: <code>playoff_results</code> + <code>regular_season</code> + <code>team_advanced</code> ·
-                Visualizations use full joined data (process metrics ↔ outcomes) ·
-                <strong>Team</strong> or <strong>Franchise</strong> mode (e.g. QUE → COL)
-            </div>
         </div>
-
-        <div class="charts-container">
-            <div class="chart chart-wide">
-                <canvas id="trendChart"></canvas>
-            </div>
-            <div class="chart">
-                <canvas id="scatterChart"></canvas>
-            </div>
-            <div class="chart">
-                <canvas id="playoffWinsHistogram"></canvas>
-            </div>
-            <div class="chart">
-                <canvas id="radarChart"></canvas>
-            </div>
         </div>
-    </div>
-
-    <div id="sqlShowcase">
-        <h2>SQL Reference & Analytics Notes</h2>
-        <p>This application loads playoff, regular season, and advanced metrics into an in-browser SQLite database. Use <strong>Team</strong> mode for a single abbreviation or <strong>Franchise</strong> mode to link continuous histories (e.g. Quebec Nordiques → Colorado Avalanche).</p>
-
-        <details open>
-            <summary>Schema</summary>
-            <pre><code>CREATE TABLE playoff_results (
-    season INTEGER, team_abbr TEXT,
-    elim_order INTEGER, elim_rank INTEGER, playoff_wins INTEGER
-);
-
-CREATE TABLE regular_season (
-    season INTEGER, team_abbr TEXT,
-    gp INTEGER, w INTEGER, l INTEGER, otl INTEGER,
-    pts INTEGER, pts_pct REAL, gf INTEGER, ga INTEGER, gd INTEGER
-);
-
-CREATE TABLE team_advanced (
-    season INTEGER, team_abbr TEXT,
-    xgf_pct REAL, cf_pct REAL, ff_pct REAL
-);</code></pre>
-        </details>
-
-        <details>
-            <summary>Wide view used by the table & charts</summary>
-            <pre><code>SELECT
-    p.season AS year, p.team_abbr,
-    r.gp AS rs_gp, r.w AS rs_w, r.l AS rs_l, r.otl AS rs_otl,
-    r.pts AS rs_pts, r.pts_pct AS rs_pts_pct,
-    r.gf AS rs_gf, r.ga AS rs_ga, r.gd AS rs_gd,
-    p.elim_rank, p.elim_order, p.playoff_wins,
-    a.xgf_pct, a.cf_pct, a.ff_pct
-FROM playoff_results p
-LEFT JOIN regular_season r ON p.season = r.season AND p.team_abbr = r.team_abbr
-LEFT JOIN team_advanced a ON p.season = a.season AND p.team_abbr = a.team_abbr
-WHERE p.team_abbr = ?                    -- Team mode
--- OR  WHERE p.team_abbr IN (?,?,…)      -- Franchise mode
-ORDER BY year DESC;</code></pre>
-        </details>
-
-        <details>
-            <summary>Franchise continuity (32 current teams)</summary>
-            <p><em>Policy: One entry per active NHL team. Predecessor abbreviations are included only when records continuously transfer. Utah is treated as expansion. MDA is not present in this dataset.</em></p>
-            <ul>
-                <li><strong>With history:</strong> CAR (ex-HFD), CGY (ex-AFM), COL (ex-QUE), DAL (ex-MNS), DET (ex-DCG/DFL), NJD (ex-KCS/CLR), TOR (ex-TAN/TSP), WPG (ex-ATL)</li>
-                <li><strong>Current identity only:</strong> ANA, BOS, BUF, CHI, CBJ, EDM, FLA, LAK, MIN, MTL, NSH, NYI, NYR, OTT, PHI, PIT, SJS, SEA, STL, TBL, UTA, VAN, VGK, WSH</li>
-            </ul>
-        </details>
-
-        <details>
-            <summary>Visualization design notes</summary>
-            <ul>
-                <li><strong>Trend multi-axis</strong>: Regular-season form and possession process (xGF%/CF%) co-move with playoff outcomes.</li>
-                <li><strong>Bubble scatter</strong>: xGF% vs Playoff Wins (bubble size = PTS%).</li>
-                <li><strong>Distribution</strong>: Playoff wins frequency with conditional averages.</li>
-                <li><strong>Radar profile</strong>: Modern-era competitive snapshot (scaled 0–100).</li>
-                <li><strong>Insights groups</strong>: Champions (elim_rank=1), Finalists (≤2), Deep Runs (≤4), Context (appearances + career wins + correlation).</li>
-            </ul>
-        </details>
     </div>
 
     <script src="script.js"></script>
